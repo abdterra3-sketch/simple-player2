@@ -459,5 +459,212 @@ jobs:
                       releasePlayer();
                   }
               }
+              private void releasePlayer() {
+                  if (mp != null) {
+                      try { mp.release(); } catch (Exception ignored) { }
+                      mp = null;
+                  }
+                  prepared = false;
+                  completed = false;
+                  btnPlay.setText("\u25B6");
+              }
 
-              private void releasePl
+              private void togglePlay() {
+                  if (mp == null || !prepared) {
+                      openPicker();
+                      return;
+                  }
+                  if (mp.isPlaying()) {
+                      mp.pause();
+                      btnPlay.setText("\u25B6");
+                  } else {
+                      if (completed || mp.getCurrentPosition() >= mp.getDuration() - 100) {
+                          mp.seekTo(0);
+                          completed = false;
+                      }
+                      mp.start();
+                      btnPlay.setText("\u23F8");
+                  }
+              }
+
+              private void seekBy(int delta) {
+                  if (mp == null || !prepared) return;
+                  int dur = mp.getDuration();
+                  int pos = Math.max(0, Math.min(dur, mp.getCurrentPosition() + delta));
+                  mp.seekTo(pos, MediaPlayer.SEEK_CLOSEST);
+                  if (pos < dur) completed = false;
+                  seek.setProgress(pos);
+                  timeCur.setText(fmt(pos));
+              }
+
+              private void screenshot() {
+                  if (mp == null || !prepared || uri == null) {
+                      Toast.makeText(this, "Buka video dulu", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  if (Build.VERSION.SDK_INT < 29 && checkSelfPermission(
+                          Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_PERM);
+                      return;
+                  }
+                  final int pos = mp.getCurrentPosition();
+                  final int dur = mp.getDuration();
+                  final boolean r916 = ratio916;
+                  final Bitmap fallback = tv.getBitmap();
+                  final Uri src = uri;
+
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          Bitmap full = null;
+                          MediaMetadataRetriever mr = new MediaMetadataRetriever();
+                          try {
+                              mr.setDataSource(MainActivity.this, src);
+                              long t = (long) Math.max(0, Math.min(pos, dur - 100)) * 1000L;
+                              full = mr.getFrameAtTime(t, MediaMetadataRetriever.OPTION_CLOSEST);
+                          } catch (Exception ignored) {
+                          } finally {
+                              try { mr.release(); } catch (Exception ignored) { }
+                          }
+                          if (full == null) full = fallback;
+                          if (full == null) {
+                              toast("Gagal mengambil gambar");
+                              return;
+                          }
+                          final Bitmap shot = cropExact(full, r916);
+                          boolean ok = saveToGallery(shot, r916);
+                          final boolean okf = ok;
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  if (okf) {
+                                      Toast.makeText(MainActivity.this,
+                                              "Tersimpan di Galeri (" + shot.getWidth() + "x"
+                                                      + shot.getHeight() + ")", Toast.LENGTH_SHORT).show();
+                                      preview.setImageBitmap(shot);
+                                      preview.setVisibility(View.VISIBLE);
+                                      handler.removeCallbacks(hidePreview);
+                                      handler.postDelayed(hidePreview, 1800);
+                                  } else {
+                                      Toast.makeText(MainActivity.this, "Gagal menyimpan",
+                                              Toast.LENGTH_SHORT).show();
+                                  }
+                              }
+                          });
+                      }
+                  }).start();
+              }
+
+              private final Runnable hidePreview = new Runnable() {
+                  @Override
+                  public void run() { preview.setVisibility(View.GONE); }
+              };
+
+              private Bitmap cropExact(Bitmap b, boolean r916) {
+                  int w = b.getWidth(), h = b.getHeight();
+                  int cw, ch;
+                  if (r916) {
+                      int u = Math.min(w / 9, h / 16);
+                      cw = u * 9;
+                      ch = u * 16;
+                  } else {
+                      int u = Math.min(w / 16, h / 9);
+                      cw = u * 16;
+                      ch = u * 9;
+                  }
+                  if (cw <= 0 || ch <= 0) return b;
+                  return Bitmap.createBitmap(b, (w - cw) / 2, (h - ch) / 2, cw, ch);
+              }
+
+              private boolean saveToGallery(Bitmap bmp, boolean r916) {
+                  String name = "VID_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+                          .format(new Date()) + (r916 ? "_9x16" : "_16x9") + ".jpg";
+                  try {
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          ContentValues cv = new ContentValues();
+                          cv.put(MediaStore.Images.Media.DISPLAY_NAME, name);
+                          cv.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                          cv.put(MediaStore.Images.Media.RELATIVE_PATH,
+                                  Environment.DIRECTORY_PICTURES + "/Screenshot Video");
+                          cv.put(MediaStore.Images.Media.IS_PENDING, 1);
+                          Uri u = getContentResolver().insert(
+                                  MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+                          if (u == null) return false;
+                          OutputStream os = getContentResolver().openOutputStream(u);
+                          bmp.compress(Bitmap.CompressFormat.JPEG, 95, os);
+                          os.close();
+                          ContentValues done = new ContentValues();
+                          done.put(MediaStore.Images.Media.IS_PENDING, 0);
+                          getContentResolver().update(u, done, null, null);
+                      } else {
+                          File dir = new File(Environment.getExternalStoragePublicDirectory(
+                                  Environment.DIRECTORY_PICTURES), "Screenshot Video");
+                          if (!dir.exists() && !dir.mkdirs()) return false;
+                          File f = new File(dir, name);
+                          FileOutputStream os = new FileOutputStream(f);
+                          bmp.compress(Bitmap.CompressFormat.JPEG, 95, os);
+                          os.close();
+                          MediaScannerConnection.scanFile(this, new String[]{f.getAbsolutePath()},
+                                  new String[]{"image/jpeg"}, null);
+                      }
+                      return true;
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+                  super.onRequestPermissionsResult(code, perms, results);
+                  if (code == REQ_PERM) {
+                      if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+                          Toast.makeText(this, "Izin diberikan, tekan tombol kamera lagi",
+                                  Toast.LENGTH_SHORT).show();
+                      } else {
+                          Toast.makeText(this, "Izin penyimpanan diperlukan", Toast.LENGTH_SHORT).show();
+                      }
+                  }
+              }
+
+              private void toast(final String s) {
+                  runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() { Toast.makeText(MainActivity.this, s, Toast.LENGTH_SHORT).show(); }
+                  });
+              }
+
+              private String fmt(int ms) {
+                  int s = ms / 1000;
+                  return String.format(Locale.US, "%02d:%02d", s / 60, s % 60);
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  if (mp != null && prepared) {
+                      try {
+                          if (mp.isPlaying()) {
+                              mp.pause();
+                              btnPlay.setText("\u25B6");
+                          }
+                      } catch (Exception ignored) { }
+                  }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  handler.removeCallbacksAndMessages(null);
+                  releasePlayer();
+                  super.onDestroy();
+              }
+          }
+          EOF
+      - run: gradle assembleDebug --no-daemon
+      - name: Cek isi APK
+        run: |
+          ls -l app/build/outputs/apk/debug/
+          unzip -l app/build/outputs/apk/debug/*.apk | grep classes.dex || echo "classes.dex TIDAK ADA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SimplePlayer-APK
+          path: app/build/outputs/apk/debug/*.apk
