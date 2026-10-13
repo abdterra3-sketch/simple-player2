@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -14,8 +14,450 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
-        with:
-          name: SimplePlayer-APK
-          path: app/build/outputs/apk/debug/*.apk
+      - name: Buat file proyek
+        run: |
+          mkdir -p app/src/main/java/com/adjm/simpleplayer
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SimplePlayer"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.adjm.simpleplayer'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.adjm.simpleplayer"
+                  minSdk 26
+                  targetSdk 33
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission
+                  android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="28" />
+
+              <application
+                  android:label="Pemutar Video"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/adjm/simpleplayer/MainActivity.java <<'EOF'
+          package com.adjm.simpleplayer;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
+          import android.graphics.SurfaceTexture;
+          import android.media.MediaMetadataRetriever;
+          import android.media.MediaPlayer;
+          import android.media.MediaScannerConnection;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.provider.MediaStore;
+          import android.view.Gravity;
+          import android.view.Surface;
+          import android.view.TextureView;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.WindowManager;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.SeekBar;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.OutputStream;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          public class MainActivity extends Activity {
+
+              private static final int REQ_FILE = 1;
+              private static final int REQ_PERM = 2;
+              private static final int STEP_MS = 5000;
+
+              private FrameLayout stage, frame;
+              private TextureView tv;
+              private ImageView preview;
+              private SeekBar seek;
+              private TextView timeCur, timeTot;
+              private Button btnPlay, btnRatio;
+
+              private MediaPlayer mp;
+              private Surface surface;
+              private Uri uri;
+              private boolean prepared = false;
+              private boolean completed = false;
+              private boolean seeking = false;
+              private boolean ratio916 = true;
+              private int vw = 0, vh = 0;
+
+              private final Handler handler = new Handler(Looper.getMainLooper());
+
+              private final Runnable ticker = new Runnable() {
+                  @Override
+                  public void run() {
+                      if (mp != null && prepared && !seeking) {
+                          try {
+                              if (mp.isPlaying()) {
+                                  int p = mp.getCurrentPosition();
+                                  seek.setProgress(p);
+                                  timeCur.setText(fmt(p));
+                              }
+                          } catch (Exception ignored) { }
+                      }
+                      handler.postDelayed(this, 200);
+                  }
+              };
+
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+
+                  final File errFile = new File(getFilesDir(), "crash.txt");
+                  if (errFile.exists()) {
+                      String txt = "";
+                      try {
+                          java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(errFile));
+                          StringBuilder sb = new StringBuilder();
+                          String line;
+                          while ((line = br.readLine()) != null) sb.append(line).append("\n");
+                          br.close();
+                          txt = sb.toString();
+                      } catch (Exception ignored) { }
+                      errFile.delete();
+                      TextView tvErr = new TextView(this);
+                      tvErr.setText(txt);
+                      tvErr.setTextSize(11);
+                      tvErr.setPadding(20, 40, 20, 20);
+                      android.widget.ScrollView sv = new android.widget.ScrollView(this);
+                      sv.addView(tvErr);
+                      setContentView(sv);
+                      return;
+                  }
+                  Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                      public void uncaughtException(Thread t, Throwable e) {
+                          try {
+                              java.io.StringWriter sw = new java.io.StringWriter();
+                              e.printStackTrace(new java.io.PrintWriter(sw));
+                              java.io.FileWriter fw = new java.io.FileWriter(errFile);
+                              fw.write(sw.toString());
+                              fw.close();
+                          } catch (Exception ignored) { }
+                          android.os.Process.killProcess(android.os.Process.myPid());
+                          System.exit(10);
+                      }
+                  });
+
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(Color.BLACK);
+
+                  stage = new FrameLayout(this);
+                  root.addView(stage, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  frame = new FrameLayout(this);
+                  frame.setBackgroundColor(Color.parseColor("#111111"));
+                  frame.setClipChildren(true);
+                  stage.addView(frame, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+
+                  tv = new TextureView(this);
+                  frame.addView(tv, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+                  tv.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+                      @Override
+                      public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int h) {
+                          surface = new Surface(st);
+                          if (mp != null) {
+                              try { mp.setSurface(surface); } catch (Exception ignored) { }
+                          }
+                      }
+                      @Override
+                      public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) { }
+                      @Override
+                      public boolean onSurfaceTextureDestroyed(SurfaceTexture st) {
+                          if (mp != null) {
+                              try { mp.setSurface(null); } catch (Exception ignored) { }
+                          }
+                          if (surface != null) { surface.release(); surface = null; }
+                          return true;
+                      }
+                      @Override
+                      public void onSurfaceTextureUpdated(SurfaceTexture st) { }
+                  });
+
+                  preview = new ImageView(this);
+                  preview.setAdjustViewBounds(true);
+                  preview.setMaxWidth(dp(110));
+                  preview.setMaxHeight(dp(160));
+                  preview.setBackgroundColor(Color.WHITE);
+                  preview.setPadding(dp(2), dp(2), dp(2), dp(2));
+                  preview.setVisibility(View.GONE);
+                  FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
+                  plp.setMargins(0, 0, dp(10), dp(10));
+                  stage.addView(preview, plp);
+
+                  stage.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                      @Override
+                      public void onLayoutChange(View v, int l, int t, int r, int bt,
+                                                 int ol, int ot, int or, int ob) {
+                          if (r - l != or - ol || bt - t != ob - ot) updateLayout();
+                      }
+                  });
+
+                  LinearLayout seekRow = new LinearLayout(this);
+                  seekRow.setOrientation(LinearLayout.HORIZONTAL);
+                  seekRow.setGravity(Gravity.CENTER_VERTICAL);
+                  seekRow.setPadding(dp(8), dp(6), dp(8), 0);
+                  timeCur = new TextView(this);
+                  timeCur.setTextColor(Color.WHITE);
+                  timeCur.setText("00:00");
+                  timeTot = new TextView(this);
+                  timeTot.setTextColor(Color.WHITE);
+                  timeTot.setText("00:00");
+                  seek = new SeekBar(this);
+                  seekRow.addView(timeCur);
+                  seekRow.addView(seek, new LinearLayout.LayoutParams(0,
+                          ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  seekRow.addView(timeTot);
+                  root.addView(seekRow, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override
+                      public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                          if (fromUser && mp != null && prepared) {
+                              timeCur.setText(fmt(p));
+                              mp.seekTo(p, MediaPlayer.SEEK_CLOSEST);
+                              completed = false;
+                          }
+                      }
+                      @Override
+                      public void onStartTrackingTouch(SeekBar s) { seeking = true; }
+                      @Override
+                      public void onStopTrackingTouch(SeekBar s) { seeking = false; }
+                  });
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  row.setPadding(dp(6), dp(4), dp(6), dp(8));
+                  mk(row, "FILE", new View.OnClickListener() {
+                      public void onClick(View v) { openPicker(); }
+                  });
+                  mk(row, "-5s", new View.OnClickListener() {
+                      public void onClick(View v) { seekBy(-STEP_MS); }
+                  });
+                  btnPlay = mk(row, "\u25B6", new View.OnClickListener() {
+                      public void onClick(View v) { togglePlay(); }
+                  });
+                  mk(row, "+5s", new View.OnClickListener() {
+                      public void onClick(View v) { seekBy(STEP_MS); }
+                  });
+                  btnRatio = mk(row, "9:16", new View.OnClickListener() {
+                      public void onClick(View v) {
+                          ratio916 = !ratio916;
+                          btnRatio.setText(ratio916 ? "9:16" : "16:9");
+                          updateLayout();
+                      }
+                  });
+                  mk(row, "\uD83D\uDCF7", new View.OnClickListener() {
+                      public void onClick(View v) { screenshot(); }
+                  });
+                  root.addView(row, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  setContentView(root);
+                  handler.post(ticker);
+              }
+
+              private Button mk(LinearLayout row, String text, View.OnClickListener l) {
+                  Button bt = new Button(this);
+                  bt.setText(text);
+                  bt.setAllCaps(false);
+                  bt.setTextSize(15);
+                  bt.setPadding(0, 0, 0, 0);
+                  bt.setMinWidth(0);
+                  bt.setMinimumWidth(0);
+                  bt.setOnClickListener(l);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(52), 1f);
+                  lp.setMargins(dp(2), 0, dp(2), 0);
+                  row.addView(bt, lp);
+                  return bt;
+              }
+
+              private void updateLayout() {
+                  int sw = stage.getWidth(), sh = stage.getHeight();
+                  if (sw == 0 || sh == 0) return;
+                  float r = ratio916 ? 9f / 16f : 16f / 9f;
+                  int fw, fh;
+                  if ((float) sw / sh > r) {
+                      fh = sh;
+                      fw = Math.round(sh * r);
+                  } else {
+                      fw = sw;
+                      fh = Math.round(sw / r);
+                  }
+                  frame.setLayoutParams(new FrameLayout.LayoutParams(fw, fh, Gravity.CENTER));
+                  if (vw > 0 && vh > 0) {
+                      float s = Math.max((float) fw / vw, (float) fh / vh);
+                      int tw = Math.round(vw * s), th = Math.round(vh * s);
+                      tv.setLayoutParams(new FrameLayout.LayoutParams(tw, th, Gravity.CENTER));
+                  }
+              }
+
+              private void openPicker() {
+                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  i.setType("video/*");
+                  startActivityForResult(i, REQ_FILE);
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req == REQ_FILE && res == RESULT_OK && data != null && data.getData() != null) {
+                      openVideo(data.getData());
+                  }
+              }
+
+              private void openVideo(Uri u) {
+                  releasePlayer();
+                  uri = u;
+                  vw = 0;
+                  vh = 0;
+                  seek.setProgress(0);
+                  timeCur.setText("00:00");
+                  try {
+                      mp = new MediaPlayer();
+                      mp.setDataSource(this, u);
+                      if (surface != null) mp.setSurface(surface);
+                      mp.setLooping(false);
+                      mp.setOnVideoSizeChangedListener(new MediaPlayer.OnVideoSizeChangedListener() {
+                          @Override
+                          public void onVideoSizeChanged(MediaPlayer p, int w, int h) {
+                              vw = w;
+                              vh = h;
+                              updateLayout();
+                          }
+                      });
+                      mp.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                          @Override
+                          public void onPrepared(MediaPlayer p) {
+                              prepared = true;
+                              completed = false;
+                              seek.setMax(p.getDuration());
+                              timeTot.setText(fmt(p.getDuration()));
+                              p.start();
+                              btnPlay.setText("\u23F8");
+                          }
+                      });
+                      mp.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                          @Override
+                          public void onCompletion(MediaPlayer p) {
+                              completed = true;
+                              btnPlay.setText("\u25B6");
+                              seek.setProgress(seek.getMax());
+                              timeCur.setText(fmt(seek.getMax()));
+                          }
+                      });
+                      mp.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                          @Override
+                          public boolean onError(MediaPlayer p, int what, int extra) {
+                              Toast.makeText(MainActivity.this, "Video tidak bisa diputar",
+                                      Toast.LENGTH_SHORT).show();
+                              return true;
+                          }
+                      });
+                      mp.prepareAsync();
+                  } catch (Exception e) {
+                      Toast.makeText(this, "Gagal membuka video", Toast.LENGTH_SHORT).show();
+                      releasePlayer();
+                  }
+              }
+
+              private void releasePl
